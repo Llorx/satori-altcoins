@@ -23,10 +23,14 @@ var rtm = new RTM(endpoint, appkey, {
 
 var subscription = rtm.subscribe(channel, RTM.SubscriptionMode.SIMPLE);
 
+var subscribed = false;
 subscription.on("enter-subscribed", function() {
-    connectBlockio();
-    //connectEthereum(); // TODO: WIP
-    connectDash();
+    if (!subscribed) {
+        subscribed = true;
+        connectBlockio();
+        connectEthereum();
+        connectDash();
+    }
 });
 
 rtm.start();
@@ -65,9 +69,9 @@ function connectEthereum() { // TODO: WIP
     // To enable WebSocket API launch with geth --ws --wsorigins "*"
     // Don't mind allowing wildcard origins as it will bind to localhost only
 
-    var txSubid, headSubId, rid = 1000;
+    var txSubid, headSubId, txid = 0, bid = 0;
 
-    var ws = new WebSocket("ws://listen.etherlisten.com:8546/");
+    var ws = new WebSocket("ws://localhost:8546/");
     ws.timeout = 5400;
     ws.on("open", function() {
         ws.send(JSON.stringify({ "id": 1, "method": "eth_subscribe", "params": ["newPendingTransactions"] }));
@@ -78,24 +82,60 @@ function connectEthereum() { // TODO: WIP
             msg = JSON.parse(msg);
             // Messages with id are replies to requests
             if (msg.id == 1) {
-                headSubId = msg.result; // Get the block subscription ID
-            } else if (msg.id == 2) {
                 txSubid = msg.result; // Get the transaction subscription ID
-            } else if (msg.id > 2) { // Above ID 2, they only are replies of transactions requests
-                console.log("TX", msg);
-            } else {
-                if (msg.params.subscription == headSubId) {
-                    console.log("BLOCK", msg);
-                } else if (msg.params.subscription == txSubid) {
-                    /*rtm.publish(channel, {
+            } else if (msg.id == 2) {
+                headSubId = msg.result; // Get the block subscription ID
+            } else if (msg.id >= 3) { // Above ID 2, they are request replies
+                if (msg.id < 10000) { // Under 10000 they are transactions
+                    msg = msg.result;
+                    rtm.publish(channel, {
                         type: "new-transactions",
                         data: {
                             network: "ETH",
-
+                            txid: msg.hash,
+                            received_at: Math.floor(new Date() / 1000),
+                            amount_received: msg.value,
+                            // ETH
+                            from: msg.from,
+                            to: msg.to,
+                            nonce: msg.nonce,
+                            gas: msg.gas,
+                            gasPrice: msg.gasPrice,
                         }
-                    });*/
-                    // TODO: Make a transaction request with the received txid and an ID above 2 minimum (rid++)
-                    console.log("TX", msg);
+                    });
+                } else { // Above 10000 they are blocks
+                    msg = msg.result;
+                    rtm.publish(channel, {
+                        type: "new-blocks",
+                        data: {
+                            network: "ETH",
+                            block_hash: msg.hash,
+                            previous_block_hash: msg.parentHash,
+                            block_no: msg.number,
+                            time: msg.timestamp,
+                            nonce: msg.nonce,
+                            difficulty: msg.difficulty,
+                            txs: msg.transactions,
+                            // ETH data
+                            miner: msg.miner,
+                            stateRoot: msg.stateRoot,
+                            txRoot: msg.transactionsRoot,
+                            receiptsRoot: msg.receiptsRoot,
+                            gasLimit: msg.gasLimit,
+                            gasUsed: msg.gasUsed,
+                            unclesHash: msg.sha3Uncles,
+                            uncles: msg.uncles,
+                            extra: msg.extraData
+                        }
+                    });
+                }
+            } else {
+                if (msg.params.subscription == headSubId) {
+                    bid = (bid++) % 1000000;
+                    ws.send(JSON.stringify({ "id": 10000 + bid, "method": "eth_getBlockByNumber", "params": [msg.params.result.number, false] }));
+                } else if (msg.params.subscription == txSubid) {
+                    txid = (txid++) % 9000;
+                    ws.send(JSON.stringify({ "id": 3 + txid, "method": "eth_getTransactionByHash", "params": [msg.params.result] }));
                 }
             }
         } catch (e) {
@@ -119,11 +159,11 @@ function connectDash() {
         // If a new transaction is received, request the data via HTTP API
         http.get("http://insight.masternode.io:3000/api/tx/" + data.txid, function(response) {
             var data = "";
-            response.setEncoding('utf8');
-            response.on('data', function(chunk) {
+            response.setEncoding("utf8");
+            response.on("data", function(chunk) {
                 data += chunk;
             });
-            response.on('end', function() {
+            response.on("end", function() {
                 try {
                     // Format the data according to block.io format
                     data = JSON.parse(data);
@@ -167,7 +207,6 @@ function connectDash() {
                         }
                     });
                 } catch (e) {
-                    console.log(e);
                     // TODO: Request again
                 }
             });
